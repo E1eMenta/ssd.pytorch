@@ -102,12 +102,11 @@ class ToPercentCoords(object):
 
 
 class Resize(object):
-    def __init__(self, size=300):
+    def __init__(self, size=(300, 300)):
         self.size = size
 
     def __call__(self, image, boxes=None, labels=None):
-        image = cv2.resize(image, (self.size,
-                                 self.size))
+        image = cv2.resize(image, self.size)
         return image, boxes, labels
 
 
@@ -218,22 +217,23 @@ class RandomSampleCrop(object):
             boxes (Tensor): the adjusted bounding boxes in pt form
             labels (Tensor): the class labels for each bbox
     """
-    def __init__(self):
+    def __init__(self, size=(300, 300), ar_range=(0.9, 1.1)):
+        self.size = size
+        self.ar_range = ar_range
         self.sample_options = (
             # using entire original input image
             None,
-            # sample a patch s.t. MIN jaccard w/ obj in .1,.3,.4,.7,.9
-            (0.1, None),
-            (0.3, None),
+            # sample a patch s.t. MIN jaccard w/ obj in .7,.9
             (0.7, None),
             (0.9, None),
-            # randomly sample a patch
-            (None, None),
+
         )
 
     def __call__(self, image, boxes=None, labels=None):
         height, width, _ = image.shape
+
         while True:
+            current_image = image
             # randomly choose a mode
             mode = random.choice(self.sample_options)
             if mode is None:
@@ -244,81 +244,59 @@ class RandomSampleCrop(object):
                 min_iou = float('-inf')
             if max_iou is None:
                 max_iou = float('inf')
+            h = self.size[0] / np.sqrt(random.uniform(self.ar_range[0], self.ar_range[1]))
+            w = self.size[1] * np.sqrt(random.uniform(self.ar_range[0], self.ar_range[1]))
 
-            # max trails (50)
-            for _ in range(50):
-                current_image = image
+            h = np.clip(h, a_min=0, a_max=height)
+            w = np.clip(w, a_min=0, a_max=width)
 
-                w = random.uniform(0.3 * width, width)
-                h = random.uniform(0.3 * height, height)
+            left = random.uniform(width - w)
+            top = random.uniform(height - h)
+            rect = np.array([int(left), int(top), int(left + w), int(top + h)])
 
-                # aspect ratio constraint b/t .5 & 2
-                if h / w < 0.5 or h / w > 2:
-                    continue
+            centers = (boxes[:, :2] + boxes[:, 2:]) / 2.0
 
-                left = random.uniform(width - w)
-                top = random.uniform(height - h)
+            # mask in all gt boxes that above and to the left of centers
+            m1 = (rect[0] < centers[:, 0]) * (rect[1] < centers[:, 1])
 
-                # convert to integer rect x1,y1,x2,y2
-                rect = np.array([int(left), int(top), int(left+w), int(top+h)])
+            # mask in all gt boxes that under and to the right of centers
+            m2 = (rect[2] > centers[:, 0]) * (rect[3] > centers[:, 1])
 
-                # calculate IoU (jaccard overlap) b/t the cropped and gt boxes
-                overlap = jaccard_numpy(boxes, rect)
+            # mask in that both m1 and m2 are true
+            mask = m1 * m2
 
-                # is min and max overlap constraint satisfied? if not try again
-                if overlap.min() < min_iou and max_iou < overlap.max():
-                    continue
+            if not mask.any():
+                continue
+            current_image = current_image[rect[1]:rect[3], rect[0]:rect[2],
+                            :]
+            current_boxes = boxes[mask, :].copy()
+            # take only matching gt labels
+            current_labels = labels[mask]
 
-                # cut the crop from the image
-                current_image = current_image[rect[1]:rect[3], rect[0]:rect[2],
-                                              :]
+            # should we use the box left and top corner or the crop's
+            current_boxes[:, :2] = np.maximum(current_boxes[:, :2],
+                                              rect[:2])
+            # adjust to crop (by substracting crop's left,top)
+            current_boxes[:, :2] -= rect[:2]
+            current_boxes[:, 2:] = np.minimum(current_boxes[:, 2:],
+                                              rect[2:])
+            # adjust to crop (by substracting crop's left,top)
+            current_boxes[:, 2:] -= rect[:2]
 
-                # keep overlap with gt box IF center in sampled patch
-                centers = (boxes[:, :2] + boxes[:, 2:]) / 2.0
-
-                # mask in all gt boxes that above and to the left of centers
-                m1 = (rect[0] < centers[:, 0]) * (rect[1] < centers[:, 1])
-
-                # mask in all gt boxes that under and to the right of centers
-                m2 = (rect[2] > centers[:, 0]) * (rect[3] > centers[:, 1])
-
-                # mask in that both m1 and m2 are true
-                mask = m1 * m2
-
-                # have any valid boxes? try again if not
-                if not mask.any():
-                    continue
-
-                # take only matching gt boxes
-                current_boxes = boxes[mask, :].copy()
-
-                # take only matching gt labels
-                current_labels = labels[mask]
-
-                # should we use the box left and top corner or the crop's
-                current_boxes[:, :2] = np.maximum(current_boxes[:, :2],
-                                                  rect[:2])
-                # adjust to crop (by substracting crop's left,top)
-                current_boxes[:, :2] -= rect[:2]
-
-                current_boxes[:, 2:] = np.minimum(current_boxes[:, 2:],
-                                                  rect[2:])
-                # adjust to crop (by substracting crop's left,top)
-                current_boxes[:, 2:] -= rect[:2]
-
-                return current_image, current_boxes, current_labels
+            return current_image, current_boxes, current_labels
 
 
 class Expand(object):
-    def __init__(self, mean):
+    def __init__(self, mean, exp_ratio=4):
         self.mean = mean
+        self.exp_ratio = exp_ratio
 
     def __call__(self, image, boxes, labels):
         if random.randint(2):
             return image, boxes, labels
 
         height, width, depth = image.shape
-        ratio = random.uniform(1, 4)
+        ratio = random.uniform(1, self.exp_ratio)
         left = random.uniform(0, width*ratio - width)
         top = random.uniform(0, height*ratio - height)
 
@@ -338,9 +316,11 @@ class Expand(object):
 
 
 class RandomMirror(object):
+    def __init__(self, flip_chance=0.3):
+        self.flip_chance = flip_chance
     def __call__(self, image, boxes, classes):
         _, width, _ = image.shape
-        if random.randint(2):
+        if random.rand() < self.flip_chance:
             image = image[:, ::-1]
             boxes = boxes.copy()
             boxes[:, 0::2] = width - boxes[:, 2::-2]
@@ -398,19 +378,32 @@ class PhotometricDistort(object):
 
 
 class SSDAugmentation(object):
-    def __init__(self, size=300, mean=(104, 117, 123)):
+    def __init__(self, size=(300, 300), mean=(104, 117, 123), exp_ratio=4, ar_range=(0.9, 1.1), flip_chance=0.3):
         self.mean = mean
         self.size = size
         self.augment = Compose([
             ConvertFromInts(),
             ToAbsoluteCoords(),
             PhotometricDistort(),
-            Expand(self.mean),
-            RandomSampleCrop(),
-            RandomMirror(),
+            Expand(self.mean, exp_ratio=exp_ratio),
+            RandomSampleCrop(size=size, ar_range=ar_range),
+            RandomMirror(flip_chance=flip_chance),
             ToPercentCoords(),
             Resize(self.size),
             SubtractMeans(self.mean)
+        ])
+
+    def __call__(self, img, boxes, labels):
+        return self.augment(img, boxes, labels)
+
+class BaseTransform(object):
+    def __init__(self, size=(300, 300)):
+        self.size = size
+        self.augment = Compose([
+            ConvertFromInts(),
+            ToAbsoluteCoords(),
+            ToPercentCoords(),
+            Resize(self.size),
         ])
 
     def __call__(self, img, boxes, labels):
