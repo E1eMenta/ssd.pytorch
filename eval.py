@@ -14,7 +14,7 @@ from data import VOCroot
 from data import VOC_CLASSES as labelmap
 import torch.utils.data as data
 
-from data import AnnotationTransform, VOCDetection, BaseTransform, VOC_CLASSES
+from data import AnnotationTransform, VOCDetection, BaseTransform, VOC_CLASSES, detection_collate
 from ssd import build_ssd
 
 import sys
@@ -409,12 +409,30 @@ def evaluate_detections(box_list, output_dir, dataset):
 if __name__ == '__main__':
     # load net
     num_classes = len(VOC_CLASSES) + 1 # +1 background
-    net = build_ssd('test', 300, num_classes) # initialize SSD
+    net = build_ssd('train', 300, num_classes) # initialize SSD
     net.load_state_dict(torch.load(args.trained_model))
-    net.eval()
+    net.train()
     print('Finished loading model!')
     # load data
     dataset = VOCDetection(args.voc_root, [('2007', set_type)], BaseTransform(300, dataset_mean), AnnotationTransform())
+    data_loader = data.DataLoader(dataset, 32, num_workers=2,
+                                  shuffle=False, collate_fn=detection_collate, pin_memory=True)
+    from layers.modules import MultiBoxLoss
+    criterion = MultiBoxLoss(num_classes, 0.5, True, 0, True, 3, 0.5, False, args.cuda)
+
+    from validation import Validator
+    v = Validator(data_loader, net, num_classes, criterion=criterion)
+
+    AP, mAP, losses = v.validate()
+    for idx, a in enumerate(AP):
+        print("{0:20}  AP: {1:.4f}".format(VOC_CLASSES[idx], a))
+    print("mAP", mAP)
+    print("total loss: {0:.4f},  class loss: {1:.4f}, loc loss: {2:.4f}".format(losses[0], losses[1], losses[2]))
+
+    exit()
+
+    net.eval()
+
     if args.cuda:
         net = net.cuda()
         cudnn.benchmark = True
