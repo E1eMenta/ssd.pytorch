@@ -209,10 +209,8 @@ class Validator():
             tp_list.append(true_pos)
             pos_list.append(pos)
 
-        print(len(pos_list))
         positives = np.stack(pos_list)
         positives = np.sum(positives, axis=0)
-        print(positives)
 
         tp_list = np.concatenate(tp_list, axis=0)
         pred_labels_list = np.concatenate(pred_labels_list, axis=0)
@@ -264,6 +262,7 @@ def mathching_mask(true_bboxes, true_labels, pred_bboxes, pred_labels, num_class
 
     for class_idx in range(num_classes):
         true_bboxes_i = true_bboxes[true_labels == class_idx]
+        positives[class_idx] = len(true_bboxes_i)
         pred_bboxes_i = pred_bboxes[pred_labels == class_idx]
         if len(pred_bboxes_i) == 0:
             continue
@@ -282,7 +281,7 @@ def mathching_mask(true_bboxes, true_labels, pred_bboxes, pred_labels, num_class
                 true_matched[idx] = 1
                 pred_matched[np.argmax(iou)] = 1
         is_matched[pred_labels == class_idx] = pred_matched
-        positives[class_idx] = len(true_bboxes_i)
+
 
     return positives, is_matched
 
@@ -310,11 +309,7 @@ def match_output(true_bboxes, true_labels, pred_bboxes, pred_labels, num_classes
         pred_matched = np.zeros((len(pred_bboxes_i)), dtype=np.int32)
         if len(pred_bboxes_i) > 0:
             for idx, true_bbox in enumerate(true_bboxes_i):
-                # print(true_bbox)
-                # print(pred_bboxes_i)
                 iou = IoU_point_np(true_bbox, pred_bboxes_i)
-                # print(iou)
-                # print()
                 # exclude matched bboxes
                 iou = iou * (1 - pred_matched)
 
